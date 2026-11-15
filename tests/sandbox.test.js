@@ -6,7 +6,6 @@ var fs = require('node:fs');
 var path = require('node:path');
 var vm = require('node:vm');
 var nodeCrypto = require('node:crypto');
-var esbuild = require('esbuild');
 
 var cheerio = require('cheerio-without-node-native');
 var CryptoJS = require('crypto-js');
@@ -336,77 +335,38 @@ function loadCodeInStrictSandbox(code, virtualFilename, spyHeaders) {
   return mod.exports;
 }
 
-test('sandbox: manifest.json schema is valid and references unified magyar bundle', function () {
+test('sandbox: manifest.json schema is valid and references all 13 built provider bundles', function () {
   assert.ok(MANIFEST.name && MANIFEST.version && Array.isArray(MANIFEST.scrapers));
-  assert.equal(MANIFEST.scrapers.length, 1);
+  assert.equal(MANIFEST.scrapers.length, 13);
 
-  var sc = MANIFEST.scrapers[0];
-  assert.equal(sc.id, 'magyar');
-  assert.equal(sc.filename, 'providers/magyar.js');
-  var fullPath = path.join(ROOT, sc.filename);
-  assert.ok(fs.existsSync(fullPath), 'Missing bundle file: ' + sc.filename);
-  assert.ok(Array.isArray(sc.supportedTypes) && sc.supportedTypes.length > 0);
-});
-
-test('sandbox: compiled unified providers/magyar.js executes cleanly in strict QuickJS-like VM across movie, tv, and mediaklikk', async function () {
-  var bundlePath = path.join(ROOT, 'providers', 'magyar.js');
-  var code = fs.readFileSync(bundlePath, 'utf8');
-
-  var spyMovie = [];
-  var movieProv = loadCodeInStrictSandbox(code, bundlePath, spyMovie);
-  var movieStreams = await movieProv.getStreams('238', 'movie');
-  assertValidStreams(movieStreams, 'magyar(movie)', spyMovie);
-  assert.ok(movieStreams.length <= 10, 'magyar(movie) should respect maxStreams cap');
-  // Sorted strictly by quality descending inside same language
-  var qOrder = movieStreams.map(function (s) { return parseInt(s.quality, 10) || 0; });
-  for (var i = 1; i < qOrder.length; i++) {
-    assert.ok(qOrder[i] <= qOrder[i - 1], 'Streams not sorted descending by resolution: ' + qOrder.join(','));
+  for (var i = 0; i < MANIFEST.scrapers.length; i++) {
+    var sc = MANIFEST.scrapers[i];
+    assert.ok(sc.id && sc.name && sc.filename);
+    var fullPath = path.join(ROOT, sc.filename);
+    assert.ok(fs.existsSync(fullPath), 'Missing bundle file: ' + sc.filename);
+    assert.ok(Array.isArray(sc.supportedTypes) && sc.supportedTypes.length > 0);
   }
-
-  var spyTv = [];
-  var tvProv = loadCodeInStrictSandbox(code, bundlePath, spyTv);
-  var tvStreams = await tvProv.getStreams('1396', 'tv', 1, 1);
-  assertValidStreams(tvStreams, 'magyar(tv)', spyTv);
-
-  var spyMk = [];
-  var mkProv = loadCodeInStrictSandbox(code, bundlePath, spyMk);
-  var mkStreams = await mkProv.getStreams('mediaklikk:video:mockTok123', 'movie');
-  assertValidStreams(mkStreams, 'magyar(mediaklikk)', spyMk);
 });
 
-test('sandbox: all 13 underlying source modules also execute cleanly in strict QuickJS-like VM', async function () {
-  var SUB_IDS = [
-    'netmozi', 'jobbmintatv', 'filmezek', 'onlinefilmek', 'hdmozi',
-    'dmdamedia', 'sorozatok_net', 'videa', 'indavideo', 'filmvilag',
-    'mediaklikk', 'mesefilm', 'videakid'
-  ];
-
-  for (var i = 0; i < SUB_IDS.length; i++) {
-    var id = SUB_IDS[i];
-    var built = esbuild.buildSync({
-      entryPoints: [path.join(ROOT, 'src', id, 'index.js')],
-      bundle: true,
-      write: false,
-      platform: 'neutral',
-      format: 'cjs',
-      target: 'es2016',
-      mainFields: ['module', 'main'],
-      external: ['cheerio-without-node-native', 'react-native-cheerio', 'cheerio', 'crypto-js', 'axios'],
-      loader: { '.json': 'json' }
-    });
-    var code = built.outputFiles[0].text;
+test('sandbox: every compiled bundle loads and executes cleanly in restricted QuickJS-like VM', async function () {
+  for (var i = 0; i < MANIFEST.scrapers.length; i++) {
+    var sc = MANIFEST.scrapers[i];
     var spyHeaders = [];
-    var provider = loadCodeInStrictSandbox(code, 'virtual://' + id + '.js', spyHeaders);
-    assert.equal(typeof provider.getStreams, 'function', id + ' must export getStreams');
+    var bundlePath = path.join(ROOT, sc.filename);
+    var code = fs.readFileSync(bundlePath, 'utf8');
+    var provider = loadCodeInStrictSandbox(code, bundlePath, spyHeaders);
+
+    assert.equal(typeof provider.getStreams, 'function', sc.id + ' must export getStreams');
 
     var streams;
-    if (id === 'sorozatok_net') {
+    if (sc.id === 'sorozatok_net') {
       streams = await provider.getStreams('1396', 'tv', 1, 1);
-    } else if (id === 'mediaklikk') {
+    } else if (sc.id === 'mediaklikk') {
       streams = await provider.getStreams('mediaklikk:video:mockTok123', 'movie');
     } else {
       streams = await provider.getStreams('238', 'movie');
     }
-    assertValidStreams(streams, id, spyHeaders);
+
+    assertValidStreams(streams, sc.id, spyHeaders);
   }
 });
