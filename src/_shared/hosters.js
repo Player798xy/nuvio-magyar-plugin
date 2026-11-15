@@ -103,10 +103,13 @@ function buildNuvioStream(opts) {
   var hoster = opts.hoster || '';
   var language = normalizeLanguageLabel(opts.language);
   var langSuffix = getLangRank(language) === 1 ? ' (Felirat)' : (getLangRank(language) === 2 ? ' (ENG)' : '');
+  var sourceLabel = (hoster && provider.toLowerCase().indexOf(hoster.toLowerCase()) === -1)
+    ? (provider + ' (' + hoster + ')')
+    : (provider || hoster || 'Magyar');
 
-  var name = provider + (hoster ? ' • ' + hoster : '') + langSuffix + ' [' + qStr + ' ' + kindBadge + ']';
+  var name = '🇭🇺 ' + qStr + ' ' + kindBadge + langSuffix + ' • ' + sourceLabel;
   var titlePrefix = opts.title ? opts.title + ' • ' : '';
-  var title = titlePrefix + provider + (hoster ? ' (' + hoster + ')' : '') + ' • ' + qStr + ' ' + kindBadge + ' • ' + language;
+  var title = titlePrefix + sourceLabel + ' • ' + qStr + ' ' + kindBadge + ' • ' + language;
 
   var streamObj = {
     name: name,
@@ -126,31 +129,119 @@ function buildNuvioStream(opts) {
   return streamObj;
 }
 
-function finalizeStreams(streams) {
-  if (!Array.isArray(streams)) return [];
-  var seen = {};
-  var deduped = [];
-  for (var i = 0; i < streams.length; i++) {
-    var s = streams[i];
-    if (!s || typeof s.url !== 'string' || !/^https?:\/\//i.test(s.url)) continue;
-    var key = s.url.trim();
-    if (seen[key]) continue;
-    seen[key] = true;
-    deduped.push(s);
-  }
+function canonicalStreamKey(url) {
+  var raw = String(url || '').trim();
+  var videaM = raw.match(/(?:videa|videakid)\.hu\/static\/[^/]+\/([0-9.]+)/i);
+  if (videaM) return 'videa-upload:' + videaM[1];
+  var indaM = raw.match(/indavideo\.hu\/indavideo\/([0-9\/]+\/[^/?]+?)(?:\.\d{3,4})?\.mp4/i);
+  if (indaM) return 'inda-upload:' + indaM[1];
+  return 'url:' + raw.split('#')[0];
+}
 
-  deduped.sort(function (a, b) {
-    var lrA = a._langRank != null ? a._langRank : getLangRank(a.language);
-    var lrB = b._langRank != null ? b._langRank : getLangRank(b.language);
-    if (lrA !== lrB) return lrA - lrB;
-    var hA = a._height || parseQualityHeight(a.quality, 720);
-    var hB = b._height || parseQualityHeight(b.quality, 720);
-    if (hA !== hB) return hB - hA;
+function pruneTierByQuality(list) {
+  if (!list || list.length <= 1) return list || [];
+  var maxH = 0;
+  for (var i = 0; i < list.length; i++) {
+    if (list[i]._height > maxH) maxH = list[i]._height;
+  }
+  var minAllowed = 0;
+  if (maxH >= 720) minAllowed = 720;
+  else if (maxH >= 480) minAllowed = 480;
+  else if (maxH >= 360) minAllowed = 360;
+  if (minAllowed === 0) return list;
+
+  var filtered = list.filter(function (s) { return s._height >= minAllowed; });
+  return filtered.length > 0 ? filtered : list;
+}
+
+function sortStreamsInPlace(arr) {
+  arr.sort(function (a, b) {
+    if (a._langRank !== b._langRank) return a._langRank - b._langRank;
+    if (a._height !== b._height) return b._height - a._height;
     if (a.type !== b.type) return a.type === 'hls' ? -1 : 1;
     return 0;
   });
+}
 
-  return deduped.map(function (s) {
+function finalizeStreams(streams, opts) {
+  if (!Array.isArray(streams)) return [];
+  var maxStreams = (opts && typeof opts.maxStreams === 'number' && opts.maxStreams > 0) ? opts.maxStreams : 10;
+
+  var normalized = [];
+  for (var i = 0; i < streams.length; i++) {
+    var s = streams[i];
+    if (!s || typeof s.url !== 'string' || !/^https?:\/\//i.test(s.url)) continue;
+    normalized.push({
+      name: s.name,
+      title: s.title,
+      url: s.url.trim(),
+      quality: s.quality,
+      language: s.language,
+      provider: s.provider,
+      type: s.type,
+      headers: s.headers,
+      _height: s._height || parseQualityHeight(s.quality, 720),
+      _langRank: s._langRank != null ? s._langRank : getLangRank(s.language)
+    });
+  }
+
+  // Sort best quality / language first so upload deduplication keeps the highest resolution
+  sortStreamsInPlace(normalized);
+
+  var seenUrls = {};
+  var seenAssets = {};
+  var deduped = [];
+  for (var d = 0; d < normalized.length; d++) {
+    var item = normalized[d];
+    var assetKey = canonicalStreamKey(item.url);
+    if (seenUrls[item.url] || seenAssets[assetKey]) continue;
+    seenUrls[item.url] = true;
+    seenAssets[assetKey] = true;
+    deduped.push(item);
+  }
+
+  var tier0 = [];
+  var tier1 = [];
+  var tier2 = [];
+  for (var k = 0; k < deduped.length; k++) {
+    var r = deduped[k]._langRank;
+    if (r === 0) tier0.push(deduped[k]);
+    else if (r === 1) tier1.push(deduped[k]);
+    else tier2.push(deduped[k]);
+  }
+
+  tier0 = pruneTierByQuality(tier0);
+  tier1 = pruneTierByQuality(tier1);
+  tier2 = pruneTierByQuality(tier2);
+
+  var hasHuHd = tier0.some(function (s) { return s._height >= 720; });
+  var huFhdCount = tier0.filter(function (s) { return s._height >= 1080; }).length;
+  if (huFhdCount >= 2) {
+    var compacted = [];
+    var kept720 = 0;
+    for (var t = 0; t < tier0.length; t++) {
+      if (tier0[t]._height >= 1080) {
+        compacted.push(tier0[t]);
+      } else if (kept720 < 3) {
+        compacted.push(tier0[t]);
+        kept720++;
+      }
+    }
+    tier0 = compacted;
+  }
+
+  if (hasHuHd) {
+    tier2 = [];
+    if (tier1.length > 2) tier1 = tier1.slice(0, 2);
+  }
+
+  var combined = tier0.concat(tier1, tier2);
+  sortStreamsInPlace(combined);
+  if (combined.length > maxStreams) {
+    combined = combined.slice(0, maxStreams);
+  }
+
+  return combined.map(function (s) {
     var clean = {
       name: s.name,
       title: s.title,
@@ -374,23 +465,19 @@ async function resolveVideaEmbed(iframeSrc, forcedDomain) {
 async function extractVideaStreams(vcodeOrUrl, providerLabel, customTitle, languageLabel) {
   var info = await extractVideaInfo(vcodeOrUrl);
   if (!info || !info.sources.length) return [];
-  var out = [];
-  for (var i = 0; i < info.sources.length; i++) {
-    var src = info.sources[i];
-    var s = buildNuvioStream({
-      url: src.url,
-      provider: providerLabel || 'Videa',
-      hoster: 'Videa',
-      title: customTitle || info.videoTitle,
-      quality: src.quality,
-      height: src.height,
-      language: languageLabel || 'Magyar Szinkron',
-      isHls: false,
-      headers: src.headers
-    });
-    if (s) out.push(s);
-  }
-  return out;
+  var best = info.sources[0];
+  var s = buildNuvioStream({
+    url: best.url,
+    provider: providerLabel || 'Videa',
+    hoster: 'Videa',
+    title: customTitle || info.videoTitle,
+    quality: best.quality,
+    height: best.height,
+    language: languageLabel || 'Magyar Szinkron',
+    isHls: false,
+    headers: best.headers
+  });
+  return s ? [s] : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -510,23 +597,19 @@ async function extractIndavideoInfo(urlOrHash) {
 async function extractIndavideoStreams(urlOrHash, providerLabel, customTitle, languageLabel) {
   var info = await extractIndavideoInfo(urlOrHash);
   if (!info || !info.sources.length) return [];
-  var out = [];
-  for (var i = 0; i < info.sources.length; i++) {
-    var src = info.sources[i];
-    var s = buildNuvioStream({
-      url: src.url,
-      provider: providerLabel || 'Indavideo',
-      hoster: 'Indavideo',
-      title: customTitle || info.videoTitle,
-      quality: src.quality,
-      height: src.height,
-      language: languageLabel || 'Magyar Szinkron',
-      isHls: false,
-      headers: src.headers
-    });
-    if (s) out.push(s);
-  }
-  return out;
+  var best = info.sources[0];
+  var s = buildNuvioStream({
+    url: best.url,
+    provider: providerLabel || 'Indavideo',
+    hoster: 'Indavideo',
+    title: customTitle || info.videoTitle,
+    quality: best.quality,
+    height: best.height,
+    language: languageLabel || 'Magyar Szinkron',
+    isHls: false,
+    headers: best.headers
+  });
+  return s ? [s] : [];
 }
 
 // ---------------------------------------------------------------------------
@@ -673,7 +756,9 @@ async function extractOkRuStreams(embedUrl, providerLabel, customTitleOrMeta, me
     }
   } catch (_) {}
 
-  return streams;
+  if (streams.length <= 1) return streams;
+  sortStreamsInPlace(streams);
+  return [streams[0]];
 }
 
 // ---------------------------------------------------------------------------
@@ -775,8 +860,7 @@ async function extractVoe(embedUrl, providerLabel, customTitle, languageLabel) {
             headers: headers
           });
           if (s1) streams.push(s1);
-        }
-        if (data.direct_access_url && /^https?:\/\//i.test(data.direct_access_url)) {
+        } else if (data.direct_access_url && /^https?:\/\//i.test(data.direct_access_url)) {
           var s2 = buildNuvioStream({
             url: data.direct_access_url,
             provider: providerLabel || 'VOE',
@@ -890,20 +974,20 @@ async function extractRpmStream(rpmUrlOrId, referer, providerLabel, customTitle,
 
       var out = [];
       if (variants.length > 0) {
-        for (var v = 0; v < variants.length; v++) {
-          var st = buildNuvioStream({
-            url: variants[v].url,
-            provider: providerLabel || 'RPM',
-            hoster: 'RPM',
-            title: streamTitle,
-            quality: variants[v].quality,
-            height: variants[v].height,
-            language: languageLabel,
-            isHls: true,
-            headers: headers
-          });
-          if (st) out.push(st);
-        }
+        variants.sort(function (a, b) { return b.height - a.height; });
+        var bestVar = variants[0];
+        var st = buildNuvioStream({
+          url: bestVar.url,
+          provider: providerLabel || 'RPM',
+          hoster: 'RPM',
+          title: streamTitle,
+          quality: bestVar.quality,
+          height: bestVar.height,
+          language: languageLabel,
+          isHls: true,
+          headers: headers
+        });
+        if (st) out.push(st);
       } else {
         var fallbackSt = buildNuvioStream({
           url: masterUrl,
@@ -1168,24 +1252,20 @@ async function extractByse(url, providerLabel, customTitle, languageLabel) {
           });
           valid.sort(function (a, b) { return (b.height || 0) - (a.height || 0); });
           if (valid.length > 0) {
-            var out = [];
-            for (var i = 0; i < valid.length; i++) {
-              var item = valid[i];
-              var h = Number(item.height) || inferHeight(item.label || data.title || '', 720);
-              var isHls = item.url.indexOf('.m3u8') !== -1 || (item.mime_type || '').indexOf('mpegurl') !== -1;
-              var st = buildNuvioStream({
-                url: item.url,
-                provider: providerLabel || 'Filemoon',
-                hoster: 'Filemoon',
-                title: customTitle || data.title || '',
-                height: h,
-                language: languageLabel,
-                isHls: isHls,
-                headers: { Referer: u.origin + '/', Origin: u.origin, 'User-Agent': UA }
-              });
-              if (st) out.push(st);
-            }
-            if (out.length > 0) return out;
+            var item = valid[0];
+            var h = Number(item.height) || inferHeight(item.label || data.title || '', 720);
+            var isHls = item.url.indexOf('.m3u8') !== -1 || (item.mime_type || '').indexOf('mpegurl') !== -1;
+            var st = buildNuvioStream({
+              url: item.url,
+              provider: providerLabel || 'Filemoon',
+              hoster: 'Filemoon',
+              title: customTitle || data.title || '',
+              height: h,
+              language: languageLabel,
+              isHls: isHls,
+              headers: { Referer: u.origin + '/', Origin: u.origin, 'User-Agent': UA }
+            });
+            if (st) return [st];
           }
         }
       }

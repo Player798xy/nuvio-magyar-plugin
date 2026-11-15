@@ -359,3 +359,83 @@ test('hosters: finalizeStreams strips spoofing headers, deduplicates, and sorts 
   assert.equal(out[1].headers['Client-IP'], undefined);
   assert.equal(out[1].headers['Referer'], 'https://videa.hu/');
 });
+
+test('hosters: finalizeStreams collapses same-upload qualities, drops low-res clutter when HD exists, and sorts strictly', function () {
+  var streams = [
+    hosters.buildNuvioStream({
+      url: 'https://videa.hu/static/240p/8.999999.111111.1.0.1.1?md5=aaa&expires=999',
+      provider: 'Filmvilág2',
+      hoster: 'Videa',
+      quality: '240p',
+      height: 240,
+      language: 'Magyar Szinkron',
+      isHls: false
+    }),
+    hosters.buildNuvioStream({
+      url: 'https://videa.hu/static/360p/8.123456.789012.1.0.1.1?md5=bbb&expires=999',
+      provider: 'Videa.hu',
+      hoster: 'Videa',
+      quality: '360p',
+      height: 360,
+      language: 'Magyar Szinkron',
+      isHls: false
+    }),
+    hosters.buildNuvioStream({
+      url: 'https://videa.hu/static/w1080p/8.123456.789012.1.0.1.1?md5=ccc&expires=888',
+      provider: 'JobbMintATV',
+      hoster: 'Videa',
+      quality: '1080p',
+      height: 1080,
+      language: 'Magyar Szinkron',
+      isHls: false
+    }),
+    hosters.buildNuvioStream({
+      url: 'https://cdn.example.hu/movie_480.mp4',
+      provider: 'Indavideo',
+      hoster: 'Indavideo',
+      quality: '480p',
+      height: 480,
+      language: 'Magyar Szinkron',
+      isHls: false
+    }),
+    hosters.buildNuvioStream({
+      url: 'https://cdn.example.hu/movie_eng_1080.m3u8',
+      provider: 'NetMozi',
+      hoster: 'VOE',
+      quality: '1080p',
+      height: 1080,
+      language: 'Külföldi (ENG)',
+      isHls: true
+    }),
+    hosters.buildNuvioStream({
+      url: 'https://cdn.example.hu/movie_720.m3u8',
+      provider: 'DMDAMedia',
+      hoster: 'Vidara',
+      quality: '720p',
+      height: 720,
+      language: 'Magyar Szinkron',
+      isHls: true
+    }),
+    hosters.buildNuvioStream({
+      url: 'https://cdn.example.hu/movie_1080.m3u8',
+      provider: 'OnlineFilmek',
+      hoster: 'VOE',
+      quality: '1080p',
+      height: 1080,
+      language: 'Magyar Szinkron',
+      isHls: true
+    })
+  ];
+
+  var out = hosters.finalizeStreams(streams, { maxStreams: 10 });
+  // Only 1080p HLS, 1080p MP4 (360p of same Videa upload collapsed), and 720p HLS survive;
+  // 240p, 480p and ENG are dropped when Magyar Szinkron HD exists!
+  assert.equal(out.length, 3);
+  assert.equal(out[0].quality, '1080p');
+  assert.equal(out[0].type, 'hls');
+  assert.equal(out[1].quality, '1080p');
+  assert.equal(out[1].type, 'mp4');
+  assert.equal(out[2].quality, '720p');
+  assert.equal(out[2].type, 'hls');
+  assert.ok(out[0].name.indexOf('1080p HLS') !== -1);
+});

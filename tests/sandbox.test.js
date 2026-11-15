@@ -6,6 +6,7 @@ var fs = require('node:fs');
 var path = require('node:path');
 var vm = require('node:vm');
 var nodeCrypto = require('node:crypto');
+var esbuild = require('esbuild');
 
 var cheerio = require('cheerio-without-node-native');
 var CryptoJS = require('crypto-js');
@@ -280,12 +281,33 @@ function createMockFetch(spyHeaders) {
   };
 }
 
-function loadBundleInStrictSandbox(bundlePath, spyHeaders) {
-  var code = fs.readFileSync(bundlePath, 'utf8');
-  var mod = { exports: {} };
+function assertValidStreams(streams, label, spyHeaders) {
+  assert.ok(Array.isArray(streams), label + ' must return an array');
+  assert.ok(streams.length > 0, label + ' should return at least 1 stream against mock fixture');
 
-  // Strict Nuvio QuickJS/Hermes sandbox: NO Buffer, NO process, NO fs/http/tls/crypto,
-  // NO URL/URLSearchParams constructors, NO AbortSignal/AbortController, NO setTimeout!
+  for (var sIdx = 0; sIdx < streams.length; sIdx++) {
+    var st = streams[sIdx];
+    assert.ok(typeof st.name === 'string' && st.name.length > 0, label + ' stream missing name');
+    assert.ok(typeof st.title === 'string' && st.title.length > 0, label + ' stream missing title');
+    assert.ok(/^https?:\/\//.test(st.url), label + ' stream url invalid: ' + st.url);
+    assert.ok(/\.(mp4|m3u8)(\?|$)/i.test(st.url) || st.url.indexOf('/1080p.mp4') !== -1 || st.url.indexOf('/720.mp4') !== -1, label + ' returned non-media URL: ' + st.url);
+    assert.ok(st.type === 'mp4' || st.type === 'hls', label + ' stream type must be mp4/hls, got ' + st.type);
+    assert.ok(typeof st.quality === 'string' && st.quality.length > 0, label + ' stream missing quality');
+    assert.ok(typeof st.language === 'string' && st.language.length > 0, label + ' stream missing language');
+    assert.ok(typeof st.provider === 'string' && st.provider.length > 0, label + ' stream missing provider');
+  }
+
+  for (var hIdx = 0; hIdx < spyHeaders.length; hIdx++) {
+    var hdrs = spyHeaders[hIdx].headers || {};
+    var keys = Object.keys(hdrs).map(function (k) { return k.toLowerCase(); });
+    assert.equal(keys.indexOf('x-forwarded-for'), -1, label + ' sent forbidden X-Forwarded-For header');
+    assert.equal(keys.indexOf('client-ip'), -1, label + ' sent forbidden Client-IP header');
+    assert.equal(keys.indexOf('x-real-ip'), -1, label + ' sent forbidden X-Real-IP header');
+  }
+}
+
+function loadCodeInStrictSandbox(code, virtualFilename, spyHeaders) {
+  var mod = { exports: {} };
   var sandbox = {
     module: mod,
     exports: mod.exports,
@@ -310,63 +332,81 @@ function loadBundleInStrictSandbox(bundlePath, spyHeaders) {
   sandbox.globalThis = sandbox;
   sandbox.global = sandbox;
 
-  vm.runInNewContext(code, sandbox, { filename: bundlePath });
+  vm.runInNewContext(code, sandbox, { filename: virtualFilename });
   return mod.exports;
 }
 
-test('sandbox: manifest.json schema is valid and references all 13 built provider bundles', function () {
+test('sandbox: manifest.json schema is valid and references unified magyar bundle', function () {
   assert.ok(MANIFEST.name && MANIFEST.version && Array.isArray(MANIFEST.scrapers));
-  assert.equal(MANIFEST.scrapers.length, 13);
+  assert.equal(MANIFEST.scrapers.length, 1);
 
-  for (var i = 0; i < MANIFEST.scrapers.length; i++) {
-    var sc = MANIFEST.scrapers[i];
-    assert.ok(sc.id && sc.name && sc.filename);
-    var fullPath = path.join(ROOT, sc.filename);
-    assert.ok(fs.existsSync(fullPath), 'Missing bundle file: ' + sc.filename);
-    assert.ok(Array.isArray(sc.supportedTypes) && sc.supportedTypes.length > 0);
-  }
+  var sc = MANIFEST.scrapers[0];
+  assert.equal(sc.id, 'magyar');
+  assert.equal(sc.filename, 'providers/magyar.js');
+  var fullPath = path.join(ROOT, sc.filename);
+  assert.ok(fs.existsSync(fullPath), 'Missing bundle file: ' + sc.filename);
+  assert.ok(Array.isArray(sc.supportedTypes) && sc.supportedTypes.length > 0);
 });
 
-test('sandbox: every compiled bundle loads and executes cleanly in restricted QuickJS-like VM', async function () {
-  for (var i = 0; i < MANIFEST.scrapers.length; i++) {
-    var sc = MANIFEST.scrapers[i];
-    var spyHeaders = [];
-    var bundlePath = path.join(ROOT, sc.filename);
-    var provider = loadBundleInStrictSandbox(bundlePath, spyHeaders);
+test('sandbox: compiled unified providers/magyar.js executes cleanly in strict QuickJS-like VM across movie, tv, and mediaklikk', async function () {
+  var bundlePath = path.join(ROOT, 'providers', 'magyar.js');
+  var code = fs.readFileSync(bundlePath, 'utf8');
 
-    assert.equal(typeof provider.getStreams, 'function', sc.id + ' must export getStreams');
+  var spyMovie = [];
+  var movieProv = loadCodeInStrictSandbox(code, bundlePath, spyMovie);
+  var movieStreams = await movieProv.getStreams('238', 'movie');
+  assertValidStreams(movieStreams, 'magyar(movie)', spyMovie);
+  assert.ok(movieStreams.length <= 10, 'magyar(movie) should respect maxStreams cap');
+  // Sorted strictly by quality descending inside same language
+  var qOrder = movieStreams.map(function (s) { return parseInt(s.quality, 10) || 0; });
+  for (var i = 1; i < qOrder.length; i++) {
+    assert.ok(qOrder[i] <= qOrder[i - 1], 'Streams not sorted descending by resolution: ' + qOrder.join(','));
+  }
+
+  var spyTv = [];
+  var tvProv = loadCodeInStrictSandbox(code, bundlePath, spyTv);
+  var tvStreams = await tvProv.getStreams('1396', 'tv', 1, 1);
+  assertValidStreams(tvStreams, 'magyar(tv)', spyTv);
+
+  var spyMk = [];
+  var mkProv = loadCodeInStrictSandbox(code, bundlePath, spyMk);
+  var mkStreams = await mkProv.getStreams('mediaklikk:video:mockTok123', 'movie');
+  assertValidStreams(mkStreams, 'magyar(mediaklikk)', spyMk);
+});
+
+test('sandbox: all 13 underlying source modules also execute cleanly in strict QuickJS-like VM', async function () {
+  var SUB_IDS = [
+    'netmozi', 'jobbmintatv', 'filmezek', 'onlinefilmek', 'hdmozi',
+    'dmdamedia', 'sorozatok_net', 'videa', 'indavideo', 'filmvilag',
+    'mediaklikk', 'mesefilm', 'videakid'
+  ];
+
+  for (var i = 0; i < SUB_IDS.length; i++) {
+    var id = SUB_IDS[i];
+    var built = esbuild.buildSync({
+      entryPoints: [path.join(ROOT, 'src', id, 'index.js')],
+      bundle: true,
+      write: false,
+      platform: 'neutral',
+      format: 'cjs',
+      target: 'es2016',
+      mainFields: ['module', 'main'],
+      external: ['cheerio-without-node-native', 'react-native-cheerio', 'cheerio', 'crypto-js', 'axios'],
+      loader: { '.json': 'json' }
+    });
+    var code = built.outputFiles[0].text;
+    var spyHeaders = [];
+    var provider = loadCodeInStrictSandbox(code, 'virtual://' + id + '.js', spyHeaders);
+    assert.equal(typeof provider.getStreams, 'function', id + ' must export getStreams');
 
     var streams;
-    if (sc.id === 'sorozatok_net') {
+    if (id === 'sorozatok_net') {
       streams = await provider.getStreams('1396', 'tv', 1, 1);
-    } else if (sc.id === 'mediaklikk') {
+    } else if (id === 'mediaklikk') {
       streams = await provider.getStreams('mediaklikk:video:mockTok123', 'movie');
     } else {
       streams = await provider.getStreams('238', 'movie');
     }
-
-    assert.ok(Array.isArray(streams), sc.id + ' must return an array');
-    assert.ok(streams.length > 0, sc.id + ' should return at least 1 stream against mock fixture');
-
-    for (var sIdx = 0; sIdx < streams.length; sIdx++) {
-      var st = streams[sIdx];
-      assert.ok(typeof st.name === 'string' && st.name.length > 0, sc.id + ' stream missing name');
-      assert.ok(typeof st.title === 'string' && st.title.length > 0, sc.id + ' stream missing title');
-      assert.ok(/^https?:\/\//.test(st.url), sc.id + ' stream url invalid: ' + st.url);
-      assert.ok(/\.(mp4|m3u8)(\?|$)/i.test(st.url) || st.url.indexOf('/1080p.mp4') !== -1 || st.url.indexOf('/720.mp4') !== -1, sc.id + ' returned non-media URL: ' + st.url);
-      assert.ok(st.type === 'mp4' || st.type === 'hls', sc.id + ' stream type must be mp4/hls, got ' + st.type);
-      assert.ok(typeof st.quality === 'string' && st.quality.length > 0, sc.id + ' stream missing quality');
-      assert.ok(typeof st.language === 'string' && st.language.length > 0, sc.id + ' stream missing language');
-      assert.ok(typeof st.provider === 'string' && st.provider.length > 0, sc.id + ' stream missing provider');
-    }
-
-    // Verify ZERO X-Forwarded-For / proxy IP spoofing headers sent by any provider
-    for (var hIdx = 0; hIdx < spyHeaders.length; hIdx++) {
-      var hdrs = spyHeaders[hIdx].headers || {};
-      var keys = Object.keys(hdrs).map(function (k) { return k.toLowerCase(); });
-      assert.equal(keys.indexOf('x-forwarded-for'), -1, sc.id + ' sent forbidden X-Forwarded-For header');
-      assert.equal(keys.indexOf('client-ip'), -1, sc.id + ' sent forbidden Client-IP header');
-      assert.equal(keys.indexOf('x-real-ip'), -1, sc.id + ' sent forbidden X-Real-IP header');
-    }
+    assertValidStreams(streams, id, spyHeaders);
   }
 });

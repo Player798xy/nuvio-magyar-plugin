@@ -154,6 +154,8 @@ function cleanWikiOrTmdbTitle(title) {
   return String(title || '').replace(/\s*\([^)]*\)\s*$/g, '').trim();
 }
 
+var metaInflight = {};
+
 async function resolveMediaMeta(rawId, mediaType, season, episode) {
   var idStr = String(rawId || '').trim();
   if (!idStr) return null;
@@ -170,6 +172,21 @@ async function resolveMediaMeta(rawId, mediaType, season, episode) {
   if (cached && (Date.now() - cached.ts) < META_CACHE_TTL_MS) {
     return cached.data;
   }
+
+  if (metaInflight[cacheKey]) {
+    return await metaInflight[cacheKey];
+  }
+
+  var p = resolveMediaMetaUncached(idStr, type, isSeries, sNum, eNum, cacheKey);
+  metaInflight[cacheKey] = p;
+  try {
+    return await p;
+  } finally {
+    delete metaInflight[cacheKey];
+  }
+}
+
+async function resolveMediaMetaUncached(idStr, type, isSeries, sNum, eNum, cacheKey) {
 
   var apiKey = getSetting('tmdbApiKey', DEFAULT_TMDB_API_KEY);
   var tmdbId = '';

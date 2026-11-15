@@ -1,6 +1,6 @@
-# Nuvio Magyar Pluginok (`nuvio-magyar-plugin`)
+# Nuvio Magyar Plugin (`nuvio-magyar-plugin`)
 
-Közvetlen, **proxy nélküli** Nuvio JS Plugin csomag magyar szinkronos és feliratos filmekhez, sorozatokhoz, rajzfilmekhez és élő MTVA/MédiaKlikk adásokhoz. Minden scraper és hoster dekódoló közvetlenül a felhasználó eszközén (QuickJS / React Native Hermes runtime alatt, külső HTTP szerver nélkül) fut le.
+Közvetlen, **proxy nélküli** egységes Nuvio JS Plugin magyar szinkronos és feliratos filmekhez, sorozatokhoz, rajzfilmekhez és élő MTVA/MédiaKlikk adásokhoz. Minden scraper és hoster dekódoló közvetlenül a felhasználó eszközén (QuickJS / React Native Hermes runtime alatt, külső HTTP szerver nélkül) fut le.
 
 ## Telepítés a Nuvio alkalmazásban
 
@@ -11,29 +11,19 @@ Közvetlen, **proxy nélküli** Nuvio JS Plugin csomag magyar szinkronos és fel
 https://raw.githubusercontent.com/Player798xy/nuvio-magyar-plugin/main/manifest.json
 ```
 
-3. A Nuvio automatikusan betölti a 13 magyar forrást a `providers/*.js` csomagokból.
+3. A Nuvio **egyetlen** tiszta forrásként (`🇭🇺 Magyar`, `providers/magyar.js`) tölti be az összes magyar oldalt, így többé nem keveredik szét 13 külön fülre az angol pluginok között.
 
-## Támogatott források (`manifest.json`)
+## Működés: egységes forrás + okos minőségszűrés és rendezés
 
-| ID | Név | Típusok | Formátum | Megjegyzés |
-| --- | --- | --- | --- | --- |
-| `netmozi` | NetMozi | `movie`, `tv` | `m3u8`, `mp4` | Mindjárt / NetMozi link payload dekódolás + közvetlen hoster feloldás |
-| `jobbmintatv` | JobbMintATV | `movie`, `tv` | `mp4`, `m3u8` | `windows-1250` slug-biztos keresés, Videa/Indavideo/OK.ru/hosterek |
-| `filmezek` | Filmezek | `movie`, `tv` | `mp4`, `m3u8` | Videa (`v=` és `f=`), OK.ru, VOE, Vidmoly, Filemoon/Byse |
-| `onlinefilmek` | OnlineFilmek | `movie`, `tv` | `mp4`, `m3u8` | DooPlay REST/AJAX lejátszó opciók + hoster feloldók |
-| `hdmozi` | HDMozi | `movie`, `tv` | `m3u8`, `mp4` | RPM AES-128-CBC HLS + Videa + DooPlay opciók |
-| `dmdamedia` | DMDAMedia | `movie`, `tv` | `mp4`, `m3u8` | `?a=...` tabok, Filemoon/Byse, VOE, Vidmoly, StreamRuby, Videa, Indavideo |
-| `sorozatok_net` | Sorozatok.net | `tv` | `mp4`, `m3u8` | Keresőindex + `go.php` Hunter dekódolás + átirányítás feloldás |
-| `videa` | Videa.hu | `movie`, `tv` | `mp4` | Közvetlen Videa keresés + `_xt` RC4 XML dekódolás |
-| `indavideo` | Indavideo.hu | `movie`, `tv` | `mp4` | Közvetlen Indavideo keresés + AMF JSON MP4 feloldás |
-| `filmvilag` | Filmvilág2 | `movie` | `mp4`, `m3u8` | Keresőkatalógus + cikk beágyazások |
-| `mediaklikk` | MédiaKlikk (MTVA) | `movie`, `tv` | `m3u8` | MTVA archív klasszikusok, AJAX keresés + közvetlen CDN HLS |
-| `mesefilm` | Mesekincstár / Mesefilm | `movie`, `tv` | `mp4`, `m3u8` | Magyar rajzfilmek és mesefilmek szigorú játékidő/évszám szűréssel |
-| `videakid` | Videakid | `movie`, `tv` | `mp4` | Gyerekbarát Videa tartalmak |
+A `providers/magyar.js` központi aggregátor egyetlen közös TMDB/Cinemeta metaadat-lekérdezés után párhuzamosan futtatja a hazai forrásokat (`NetMozi`, `JobbMintATV`, `Filmezek`, `OnlineFilmek`, `HDMozi`, `DMDAMedia`, `Sorozatok.net`, `Videa.hu`, `Indavideo.hu`, `Filmvilág2`, `MédiaKlikk`, `Mesekincstár`, `Videakid`), majd a `finalizeStreams` modul automatikusan kitisztítja a listát:
+
+- **Szigorú sorrend:** először **Magyar Szinkron**, azon belül csökkenő felbontás szerint (`2160p → 1440p → 1080p → 720p → 480p`, azonos felbontásnál `HLS` előrébb az `MP4`-nél), majd szükség esetén `Magyar Felirat`.
+- **Gyenge minőség elrejtése:** ha létezik legalább egy `720p` vagy `1080p` streames találat, a `240p`, `360p` és `480p` találatok automatikusan eltűnnek (nem szemetelik tele a listát).
+- **Azonos feltöltések összevonása:** egy videófájl vagy embed több felbontása (`1080p + 720p + 480p + 360p + 240p`) nem jelenik meg 5 külön kártyaként — feltöltésenként csak a legjobb minőség marad meg, portálokon átívelő duplikációszűréssel, legfeljebb 10 válogatott streammel.
 
 ## Eszközön belüli közvetlen hoster dekódolók (`src/_shared/`)
 
-Proxy nélküli futtatásnál az IP/ASN-kötött lejátszó-tokenek közvetlenül a kliens IP-címére generálódnak, és nincs `X-Forwarded-For` vagy proxy kényszer:
+Proxy nélküli futtatásnál az IP/ASN-kötött lejátszó-tokenek közvetlenül a kliens IP-címére generálódnak, `X-Forwarded-For` vagy proxy kényszer nélkül:
 
 - **NetMozi LinkPayload v1/v2**: tisztán JS FNV-1a + `xorshift32` dekódoló (`src/_shared/crypto_decoders.js`)
 - **VOE** (és tükördomainek): 5 lépcsős ROT13 + regex tisztítás + Base64 + karaktereltolás dekódoló
@@ -47,14 +37,7 @@ Proxy nélküli futtatásnál az IP/ASN-kötött lejátszó-tokenek közvetlenü
 
 ```bash
 npm install
-npm run build        # Összes Nuvio CJS ES2016 bundle generálása (providers/*.js) + runtime biztonsági ellenőrzés
-npm test             # Egységtesztek + szigorú QuickJS-szerű VM sandbox teszt mind a 13 csomagra
-npm run test:live    # Élő integrációs füstteszt TMDB/IMDb azonosítókkal
+npm run build        # Egységes Nuvio CJS ES2016 bundle generálása (providers/magyar.js) + runtime biztonsági ellenőrzés
+npm test             # Egységtesztek + szigorú QuickJS-szerű VM sandbox teszt (magyar.js + mind a 13 almodul)
+npm run test:live    # Élő integrációs füstteszt valós filmekre, sorozatokra és élő adásra
 ```
-
-### Runtime kompatibilitási szabályok (`build.js`)
-
-A build folyamat automatikusan tiltja a következő Node-specifikus vagy proxy-függő hívásokat a `providers/*.js` fájlokban:
-- `require('tls')`, `require('crypto')`, `require('http')`, `require('https')`, `require('fs')`, `require('path')`, `require('zlib')`
-- Globális `Buffer.*`, `AbortSignal.timeout(...)`, `Response.arrayBuffer()`
-- Keménykódolt IP spoof fejlécek (`X-Forwarded-For`, `Client-IP`, `X-Real-IP`)
